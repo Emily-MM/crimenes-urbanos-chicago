@@ -221,3 +221,51 @@ func buildDataset(records []rawRecord, altoRiesgo map[riskKey]bool) []Sample {
 	}
 	return dataset
 }
+
+type PartialGradient struct {
+	Gradients []float64
+	Loss      float64
+	Count     int
+}
+
+func gradientWorker(
+	partition []Sample,
+	model *LinearModel,
+	resultCh chan<- PartialGradient,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+
+	nw := len(model.Weights)
+	grads := make([]float64, nw)
+	loss := 0.0
+
+	for _, s := range partition {
+		pred := model.Predict(s.Features)
+		if pred < 1e-10 {
+			pred = 1e-10
+		}
+		if pred > 1-1e-10 {
+			pred = 1 - 1e-10
+		}
+
+		loss += s.Weight * -(s.Target*math.Log(pred) + (1-s.Target)*math.Log(1-pred))
+
+		err := s.Weight * (pred - s.Target)
+		grads[0] += err
+		for i, v := range s.Features {
+			grads[i+1] += err * v
+		}
+	}
+
+	n := float64(len(partition))
+	for i := range grads {
+		grads[i] /= n
+	}
+
+	resultCh <- PartialGradient{
+		Gradients: grads,
+		Loss:      loss / n,
+		Count:     len(partition),
+	}
+}
