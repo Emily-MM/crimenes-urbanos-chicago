@@ -269,3 +269,61 @@ func gradientWorker(
 		Count:     len(partition),
 	}
 }
+
+func train(dataset []Sample, model *LinearModel, numWorkers, epochs int, lr float64) {
+	fmt.Printf("\nentrenamiento paralelo\n")
+	fmt.Printf("  workers : %d\n", numWorkers)
+	fmt.Printf("  epocas  : %d\n", epochs)
+	fmt.Printf("  muestras: %d\n", len(dataset))
+	fmt.Printf("  lr      : %.4f\n\n", lr)
+
+	partSize := len(dataset) / numWorkers
+
+	for epoch := 0; epoch < epochs; epoch++ {
+		resultCh := make(chan PartialGradient, numWorkers)
+		var wg sync.WaitGroup
+
+		for i := 0; i < numWorkers; i++ {
+			wg.Add(1)
+			start := i * partSize
+			end := start + partSize
+			if i == numWorkers-1 {
+				end = len(dataset)
+			}
+			go gradientWorker(dataset[start:end], model, resultCh, &wg)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultCh)
+		}()
+
+		nw := len(model.Weights)
+		aggGrads := make([]float64, nw)
+		totalLoss := 0.0
+		totalN := 0
+
+		for pg := range resultCh {
+			for i, g := range pg.Gradients {
+				aggGrads[i] += g * float64(pg.Count)
+			}
+			totalLoss += pg.Loss * float64(pg.Count)
+			totalN += pg.Count
+		}
+
+		for i := range aggGrads {
+			aggGrads[i] /= float64(totalN)
+		}
+
+		model.mu.Lock()
+		for i := range model.Weights {
+			model.Weights[i] -= lr * aggGrads[i]
+		}
+		model.mu.Unlock()
+
+		if epoch%10 == 0 || epoch == epochs-1 {
+			avgLoss := totalLoss / float64(totalN)
+			fmt.Printf("  [%d/%d] loss %.4f\n", epoch+1, epochs, avgLoss)
+		}
+	}
+}
