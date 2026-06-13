@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 )
 
@@ -98,4 +103,121 @@ type rawRecord struct {
 	Year          int
 	Latitude      float64
 	Longitude     float64
+}
+
+func loadRecords(path string, numWorkers int) ([]rawRecord, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	type chunk [][]string
+	jobs := make(chan []string, numWorkers*200)
+	results := make(chan []rawRecord, numWorkers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var batch []rawRecord
+			for row := range jobs {
+				if len(row) < 18 {
+					continue
+				}
+				hour, _ := strconv.Atoi(row[3])
+				district, _ := strconv.Atoi(row[11])
+				area, _ := strconv.Atoi(row[13])
+				lat, err1 := strconv.ParseFloat(row[16], 64)
+				lng, err2 := strconv.ParseFloat(row[17], 64)
+				if err1 != nil || err2 != nil || lat == 0 || lng == 0 {
+					continue
+				}
+				year, _ := strconv.Atoi(row[15])
+				batch = append(batch, rawRecord{
+					Hour:          hour,
+					District:      district,
+					PrimaryType:   row[5],
+					Domestic:      row[9] == "true",
+					CommunityArea: area,
+					Year:          year,
+					Latitude:      lat,
+					Longitude:     lng,
+				})
+			}
+			results <- batch
+		}()
+	}
+
+	go func() {
+		reader := csv.NewReader(bufio.NewReaderSize(file, 4*1024*1024))
+		reader.Read()
+		for {
+			row, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err == nil {
+				jobs <- row
+			}
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var all []rawRecord
+	for batch := range results {
+		all = append(all, batch...)
+	}
+	return all, nil
+}
+
+func buildDataset(records []rawRecord, altoRiesgo map[riskKey]bool) []Sample {
+	dataset := make([]Sample, len(records))
+	for i, r := range records {
+		h := float64(r.Hour) / 23.0
+		d := float64(r.District) / 25.0
+		area := float64(r.CommunityArea) / 77.0
+		domestic := 0.0
+		if r.Domestic {
+			domestic = 1.0
+		}
+		esNoche := 0.0
+		if r.Hour >= 20 || r.Hour <= 5 {
+			esNoche = 1.0
+		}
+		esTarde := 0.0
+		if r.Hour >= 12 && r.Hour < 20 {
+			esTarde = 1.0
+		}
+
+		target := 0.0
+		if altoRiesgo[riskKey{r.Hour, r.District}] {
+			target = 1.0
+		}
+
+		yr := (float64(r.Year) - 2001.0) / 25.0
+
+		weight := 1.0
+		if target == 1.0 {
+			weight = 1.35
+		}
+
+		dataset[i] = Sample{
+			Features: []float64{
+				h, d, area,
+				encodeTipo(r.PrimaryType),
+				domestic, esNoche, esTarde,
+				h * d, yr,
+			},
+			Target: target,
+			Weight: weight,
+		}
+	}
+	return dataset
 }
