@@ -1,7 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"log"
 	"math"
+	"net"
+	"os"
 	"sync"
 )
 
@@ -156,4 +162,149 @@ func calcularGradiente(weights []float64, partition []Sample) ([]float64, float6
 	}
 
 	return aggGrads, totalLoss / float64(totalN)
+}
+
+func evaluarParticion(weights []float64, partition []Sample) (tp, tn, fp, fn int) {
+	for _, s := range partition {
+		pred := predict(weights, s.Features)
+		predLabel := 0.0
+		if pred >= 0.5 {
+			predLabel = 1.0
+		}
+		switch {
+		case predLabel == 1 && s.Target == 1:
+			tp++
+		case predLabel == 0 && s.Target == 0:
+			tn++
+		case predLabel == 1 && s.Target == 0:
+			fp++
+		case predLabel == 0 && s.Target == 1:
+			fn++
+		}
+	}
+	return
+}
+
+func main() {
+	nodeID = os.Getenv("NODE_ID")
+	if nodeID == "" {
+		nodeID = "0"
+	}
+
+	port := os.Getenv("NODE_PORT")
+	if port == "" {
+		port = "9000"
+	}
+
+	addr := ":" + port
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal("error al iniciar listener:", err)
+	}
+	defer ln.Close()
+
+	fmt.Printf("[nodo %s] escuchando en %s\n", nodeID, addr)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Println("error aceptando conexion:", err)
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
+
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	encoder := json.NewEncoder(conn)
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			fmt.Printf("[nodo %s] conexion cerrada: %v\n", nodeID, err)
+			return
+		}
+
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &probe); err != nil {
+			fmt.Printf("[nodo %s] mensaje invalido: %v\n", nodeID, err)
+			continue
+		}
+
+		switch probe.Type {
+		case "init_start":
+			var msg InitStartMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				fmt.Printf("[nodo %s] error parseando init_start: %v\n", nodeID, err)
+				continue
+			}
+			myPartition = make([]Sample, 0, msg.Total)
+			fmt.Printf("[nodo %s] esperando %d muestras en bloques...\n", nodeID, msg.Total)
+			encoder.Encode(map[string]string{"status": "ready"})
+
+		case "init_chunk":
+			var msg InitChunkMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				fmt.Printf("[nodo %s] error parseando init_chunk: %v\n", nodeID, err)
+				continue
+			}
+			myPartition = append(myPartition, msg.Samples...)
+
+		case "init_end":
+			fmt.Printf("[nodo %s] particion completa: %d muestras\n", nodeID, len(myPartition))
+			encoder.Encode(map[string]string{"status": "ok", "node_id": nodeID})
+
+		case "init":
+			var msg InitMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				fmt.Printf("[nodo %s] error parseando init: %v\n", nodeID, err)
+				continue
+			}
+			myPartition = msg.Samples
+			fmt.Printf("[nodo %s] particion recibida: %d muestras\n", nodeID, len(myPartition))
+			encoder.Encode(map[string]string{"status": "ok", "node_id": nodeID})
+
+		case "train":
+			var msg TrainMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				fmt.Printf("[nodo %s] error parseando train: %v\n", nodeID, err)
+				continue
+			}
+
+			grads, loss := calcularGradiente(msg.Weights, myPartition)
+
+			resp := GradientResponse{
+				Gradients: grads,
+				Loss:      loss,
+				Count:     len(myPartition),
+				NodeID:    nodeID,
+			}
+			encoder.Encode(resp)
+
+		case "evaluate":
+			var msg EvaluateMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				fmt.Printf("[nodo %s] error parseando evaluate: %v\n", nodeID, err)
+				continue
+			}
+
+			tp, tn, fp, fn := evaluarParticion(msg.Weights, myPartition)
+
+			resp := EvalResponse{TP: tp, TN: tn, FP: fp, FN: fn, NodeID: nodeID}
+			encoder.Encode(resp)
+			fmt.Printf("[nodo %s] evaluacion completa: tp=%d tn=%d fp=%d fn=%d\n", nodeID, tp, tn, fp, fn)
+
+		case "shutdown":
+			fmt.Printf("[nodo %s] recibida orden de apagado\n", nodeID)
+			return
+
+		default:
+			fmt.Printf("[nodo %s] tipo de mensaje desconocido: %s\n", nodeID, probe.Type)
+		}
+	}
 }
