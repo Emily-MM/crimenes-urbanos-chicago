@@ -50,6 +50,20 @@ services:
       retries: 5
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.7
+    healthcheck:
+      test: redis-cli ping
+      interval: 1m
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   api:
     build: ./api
     environment:
@@ -59,6 +73,7 @@ services:
       - NODO3_ADDR=172.25.0.4:9000
       - MONGO_URI=mongodb://172.25.0.6:27017
       - MONGO_DB=chicago_crimes
+      - REDIS_ADDR=172.25.0.7:6379
       - JWT_SECRET=${JWT_SECRET}
       - AUTH_USER=${AUTH_USER}
       - AUTH_PASSWORD=${AUTH_PASSWORD}
@@ -74,6 +89,8 @@ services:
       nodo3:
         condition: service_started
       mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       red_pc4:

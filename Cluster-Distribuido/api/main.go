@@ -39,6 +39,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -846,6 +847,93 @@ func connectMongo() {
 	log.Printf("conectado a MongoDB en %s, base %s\n", uri, dbName)
 }
 
+var redisClient *redis.Client
+
+const cacheTTL = 24 * time.Hour
+
+const cacheKeyPrefix = "pred:"
+
+func connectRedis() {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+
+	client := redis.NewClient(&redis.Options{Addr: addr})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		log.Printf("aviso: no se pudo conectar a Redis en %s: %v (las consultas no se cachearan)\n", addr, err)
+		return
+	}
+
+	redisClient = client
+	log.Printf("conectado a Redis en %s\n", addr)
+}
+
+func cacheKey(hour, district int) string {
+	return fmt.Sprintf("%shour:%d:district:%d", cacheKeyPrefix, hour, district)
+}
+
+func cacheGetProb(hour, district int) (float64, bool) {
+	if redisClient == nil {
+		return 0, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	val, err := redisClient.Get(ctx, cacheKey(hour, district)).Result()
+	if err != nil {
+		return 0, false
+	}
+	prob, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return 0, false
+	}
+	return prob, true
+}
+
+func cacheSetProb(hour, district int, prob float64) {
+	if redisClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	val := strconv.FormatFloat(prob, 'f', -1, 64)
+	if err := redisClient.Set(ctx, cacheKey(hour, district), val, cacheTTL).Err(); err != nil {
+		log.Printf("aviso: no se pudo guardar en cache Redis: %v\n", err)
+	}
+}
+
+func invalidatePredictionCache() {
+	if redisClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	iter := redisClient.Scan(ctx, 0, cacheKeyPrefix+"*", 0).Iterator()
+	var keys []string
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("aviso: error escaneando cache de Redis para invalidar: %v\n", err)
+		return
+	}
+	if len(keys) == 0 {
+		return
+	}
+	if err := redisClient.Del(ctx, keys...).Err(); err != nil {
+		log.Printf("aviso: error invalidando cache de Redis: %v\n", err)
+		return
+	}
+	log.Printf("cache de predicciones invalidado (%d claves) tras nuevo entrenamiento\n", len(keys))
+}
+
 func saveTrainingRecord(rec TrainingRecord) {
 	if mongoCollection == nil {
 		log.Println("aviso: Mongo no disponible, no se guarda el historial de este entrenamiento")
@@ -1061,6 +1149,8 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 		Weights:   weightsCopy,
 	})
 
+	invalidatePredictionCache()
+
 	resp := map[string]interface{}{
 		"status":       "completado",
 		"epochs":       epochs,
@@ -1083,6 +1173,10 @@ func handleTrain(w http.ResponseWriter, r *http.Request) {
 }
 
 func predictRisk(hour, district int) float64 {
+	if cached, hit := cacheGetProb(hour, district); hit {
+		return cached
+	}
+
 	h := float64(hour) / 23.0
 	d := float64(district) / 25.0
 	esNoche := 0.0
@@ -1098,6 +1192,7 @@ func predictRisk(hour, district int) float64 {
 	prob := coordinator.Model.Predict([]float64{h, d, 0.5, 0.5, 0.0, esNoche, esTarde, h * d, 0.8})
 	coordinator.mu.Unlock()
 
+	cacheSetProb(hour, district, prob)
 	return prob
 }
 
@@ -1492,6 +1587,9 @@ func main() {
 
 	log.Println("conectando a MongoDB...")
 	connectMongo()
+
+	log.Println("conectando a Redis...")
+	connectRedis()
 
 	log.Println("cargando datos...")
 	records, err := loadRecords(dataPath)

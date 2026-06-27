@@ -1,16 +1,18 @@
 module api
 
-go 1.23
+go 1.24
 
 require (
-	github.com/coder/websocket v1.8.15
-	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/coder/websocket v1.8.13
+	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/swaggo/http-swagger v1.3.4
 	go.mongodb.org/mongo-driver/v2 v2.1.0
 )
 
 require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
 	github.com/go-openapi/jsonreference v0.20.0 // indirect
 	github.com/go-openapi/spec v0.20.6 // indirect
@@ -25,6 +27,7 @@ require (
 	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sync v0.11.0 // indirect
