@@ -1,0 +1,90 @@
+services:
+  nodo1:
+    build: ./nodo
+    environment:
+      - NODE_ID=1
+      - NODE_PORT=9000
+    ports:
+      - "9001:9000"
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.2
+
+  nodo2:
+    build: ./nodo
+    environment:
+      - NODE_ID=2
+      - NODE_PORT=9000
+    ports:
+      - "9002:9000"
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.3
+
+  nodo3:
+    build: ./nodo
+    environment:
+      - NODE_ID=3
+      - NODE_PORT=9000
+    ports:
+      - "9003:9000"
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.4
+
+  mongodb:
+    image: mongo:7
+    environment:
+      - MONGO_INITDB_DATABASE=chicago_crimes
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.6
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 1m
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build: ./api
+    environment:
+      - DATA_PATH=/datos/crimenes_limpio.csv
+      - NODO1_ADDR=172.25.0.2:9000
+      - NODO2_ADDR=172.25.0.3:9000
+      - NODO3_ADDR=172.25.0.4:9000
+      - MONGO_URI=mongodb://172.25.0.6:27017
+      - MONGO_DB=chicago_crimes
+      - JWT_SECRET=${JWT_SECRET}
+      - AUTH_USER=${AUTH_USER}
+      - AUTH_PASSWORD=${AUTH_PASSWORD}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./datos:/datos:ro
+    depends_on:
+      nodo1:
+        condition: service_started
+      nodo2:
+        condition: service_started
+      nodo3:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+    networks:
+      red_pc4:
+        ipv4_address: 172.25.0.5
+
+networks:
+  red_pc4:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "172.25.0.0/16"
+
+volumes:
+  mongo_data:
